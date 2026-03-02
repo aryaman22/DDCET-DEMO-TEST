@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef, ReactNode } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import type { ReactNode } from "react";
 
 // ═══════════════════════════════════════════════
 // TYPES
@@ -237,7 +238,7 @@ export default function App() {
   return (
     <>
       <CSS />
-      {screen === "home"        && <Home        setScreen={setScreen} questions={questions} config={config} />}
+      {screen === "home"        && <Home        setScreen={setScreen} config={config} />}
       {screen === "test"        && <Test        setScreen={setScreen} questions={questions} config={config} />}
       {screen === "result"      && <Result      setScreen={setScreen} />}
       {screen === "leaderboard" && <Leaderboard setScreen={setScreen} />}
@@ -249,7 +250,7 @@ export default function App() {
 // ═══════════════════════════════════════════════
 // HOME
 // ═══════════════════════════════════════════════
-function Home({ setScreen, questions, config }: { setScreen: (s: Screen) => void; questions: Question[]; config: TestConfig }) {
+function Home({ setScreen, config }: { setScreen: (s: Screen) => void; config: TestConfig }) {
   const [name, setName]       = useState("");
   const [branch, setBranch]   = useState("");
   const [college, setCollege] = useState("");
