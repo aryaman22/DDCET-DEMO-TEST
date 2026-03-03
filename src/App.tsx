@@ -72,7 +72,22 @@ const shuffle = <T,>(arr: T[]): T[] => {
 };
 
 // ═══════════════════════════════════════════════
-// STORAGE (localStorage — works everywhere)
+// FIREBASE CONFIG
+// 👉 Replace these values with your own Firebase project config
+// Get them from: console.firebase.google.com → Project Settings → Your Apps
+// ═══════════════════════════════════════════════
+const FB_CONFIG = {
+  apiKey:            "PASTE_YOUR_apiKey_HERE",
+  authDomain:        "PASTE_YOUR_authDomain_HERE",
+  projectId:         "PASTE_YOUR_projectId_HERE",
+  storageBucket:     "PASTE_YOUR_storageBucket_HERE",
+  messagingSenderId: "PASTE_YOUR_messagingSenderId_HERE",
+  appId:             "PASTE_YOUR_appId_HERE",
+};
+const FB_CONFIGURED = !FB_CONFIG.apiKey.includes("PASTE");
+
+// ═══════════════════════════════════════════════
+// STORAGE — localStorage (questions/config) + Firebase (scores)
 // ═══════════════════════════════════════════════
 const LS = {
   get: (key: string): string | null => { try { return localStorage.getItem(key); } catch { return null; } },
@@ -92,11 +107,76 @@ const loadQ = (): Question[] => {
 };
 const saveQ = (qs: Question[]): void => { LS.set("ddcet:questions", JSON.stringify(qs)); };
 
-const saveScore = (entry: ScoreEntry): void => {
+// Firebase dynamic loader — only loads SDK if configured
+let _db: unknown = null;
+const getDB = async (): Promise<unknown> => {
+  if (_db) return _db;
+  if (!FB_CONFIGURED) return null;
+  try {
+    const { initializeApp, getApps } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js" as string) as { initializeApp: (c: object) => unknown; getApps: () => unknown[] };
+    const app = getApps().length ? getApps()[0] : initializeApp(FB_CONFIG);
+    const { getFirestore } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js" as string) as { getFirestore: (a: unknown) => unknown };
+    _db = getFirestore(app);
+    return _db;
+  } catch { return null; }
+};
+
+// Save score — Firebase if configured, localStorage fallback
+const saveScore = async (entry: ScoreEntry): Promise<void> => {
+  // Always save locally as backup
   const key = `ddcet:score:${Date.now()}`;
   LS.set(key, JSON.stringify(entry));
+  // Try Firebase
+  if (!FB_CONFIGURED) return;
+  try {
+    const db = await getDB();
+    if (!db) return;
+    const { collection, addDoc, serverTimestamp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js" as string) as {
+      collection: (db: unknown, path: string) => unknown;
+      addDoc: (ref: unknown, data: object) => Promise<unknown>;
+      serverTimestamp: () => unknown;
+    };
+    await addDoc(collection(db, "scores"), { ...entry, createdAt: serverTimestamp() });
+  } catch (e) { console.warn("Firebase save failed, using localStorage:", e); }
 };
-const loadScores = (): ScoreEntry[] => {
+
+// Load scores — Firebase if configured, localStorage fallback
+const loadScoresRemote = async (): Promise<ScoreEntry[]> => {
+  if (!FB_CONFIGURED) return loadScoresLocal();
+  try {
+    const db = await getDB();
+    if (!db) return loadScoresLocal();
+    const { collection, getDocs, orderBy, query } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js" as string) as {
+      collection: (db: unknown, path: string) => unknown;
+      getDocs: (q: unknown) => Promise<{ docs: Array<{ data: () => ScoreEntry }> }>;
+      orderBy: (field: string, dir: string) => unknown;
+      query: (...args: unknown[]) => unknown;
+    };
+    const q = query(collection(db, "scores"), orderBy("score", "desc"));
+    const snap = await getDocs(q);
+    return snap.docs.map(d => d.data());
+  } catch { return loadScoresLocal(); }
+};
+
+const clearScoresRemote = async (): Promise<void> => {
+  // Clear local
+  LS.keys("ddcet:score:").forEach(k => { try { localStorage.removeItem(k); } catch {} });
+  if (!FB_CONFIGURED) return;
+  try {
+    const db = await getDB();
+    if (!db) return;
+    const { collection, getDocs, deleteDoc, doc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js" as string) as {
+      collection: (db: unknown, path: string) => unknown;
+      getDocs: (ref: unknown) => Promise<{ docs: Array<{ ref: unknown; id: string }> }>;
+      deleteDoc: (ref: unknown) => Promise<void>;
+      doc: (db: unknown, path: string, id: string) => unknown;
+    };
+    const snap = await getDocs(collection(db, "scores"));
+    await Promise.all(snap.docs.map(d => deleteDoc(doc(db, "scores", d.id))));
+  } catch (e) { console.warn("Firebase clear failed:", e); }
+};
+
+const loadScoresLocal = (): ScoreEntry[] => {
   return LS.keys("ddcet:score:")
     .map(k => { try { const r = LS.get(k); return r ? (JSON.parse(r) as ScoreEntry) : null; } catch { return null; } })
     .filter((x): x is ScoreEntry => x !== null)
@@ -347,6 +427,7 @@ function Home({ setScreen, config }: { setScreen: (s: Screen) => void; config: T
           </div>
         </div>
       </div>
+      <div className="footer">crafted by <span className="footer-aj">AJ</span></div>
     </div>
   );
 }
@@ -395,7 +476,7 @@ function Test({ setScreen, questions, config }: { setScreen: (s: Screen) => void
       date: new Date().toLocaleDateString("en-IN"),
     };
     sessionStorage.setItem("ddcet_result", JSON.stringify(entry));
-    saveScore(entry);
+    void saveScore(entry);
     setScreen("result");
   }, [done, testQs, ans, tLeft, student, setScreen]);
 
@@ -583,11 +664,26 @@ function Result({ setScreen }: { setScreen: (s: Screen) => void }) {
 // LEADERBOARD
 // ═══════════════════════════════════════════════
 function Leaderboard({ setScreen }: { setScreen: (s: Screen) => void }) {
-  const [scores]  = useState<ScoreEntry[]>(() => loadScores());
+  const [scores, setScores] = useState<ScoreEntry[]>([]);
+  const [loading, setLoading] = useState(true);
   const [flt, setFlt] = useState("All");
+
+  useEffect(() => {
+    loadScoresRemote().then(s => { setScores(s); setLoading(false); });
+  }, []);
 
   const branches = ["All", ...Array.from(new Set(scores.map(s => s.branch)))];
   const shown = flt === "All" ? scores : scores.filter(s => s.branch === flt);
+
+  const clearBoard = async () => {
+    if (!window.confirm("Clear ALL leaderboard scores? This cannot be undone.")) return;
+    await clearScoresRemote();
+    setScores([]);
+  };
+
+  const avgScore = scores.length ? (scores.reduce((a, b) => a + b.score, 0) / scores.length).toFixed(1) : "—";
+  const topScore = scores.length ? scores[0].score.toFixed(1) : "—";
+  const avgPct   = scores.length ? Math.round(scores.reduce((a, b) => a + (b.score / (b.total * 2)) * 100, 0) / scores.length) : 0;
 
   return (
     <div className="pg lb-pg">
@@ -595,8 +691,37 @@ function Leaderboard({ setScreen }: { setScreen: (s: Screen) => void }) {
         <div className="lb-hdr-row">
           <button className="btn-bk" onClick={() => setScreen("home")}>← Back</button>
           <h2 className="lb-ttl">🏆 Leaderboard</h2>
-          <span className="lb-cnt">{scores.length} attempts</span>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: "auto" }}>
+            <span className="lb-cnt">{scores.length} attempts</span>
+            <button className="btn-clr-lb" onClick={clearBoard}>🗑 Clear</button>
+          </div>
         </div>
+
+        {!FB_CONFIGURED && (
+          <div className="fb-banner">
+            ⚠️ <b>Local mode</b> — scores saved per-device only. <a href="#setup">Set up Firebase</a> for shared real-time leaderboard across all devices.
+          </div>
+        )}
+        {FB_CONFIGURED && (
+          <div className="fb-banner fb-ok">
+            🔥 <b>Firebase active</b> — all scores synced in real-time across every device.
+          </div>
+        )}
+
+        {loading ? (
+          <div style={{ padding: "3rem", textAlign: "center" }}><Dots /></div>
+        ) : (
+          <>
+
+        {scores.length > 0 && (
+          <div className="lb-stats">
+            <div className="lbs-cell"><div className="lbs-v">{scores.length}</div><div className="lbs-l">Total Attempts</div></div>
+            <div className="lbs-cell"><div className="lbs-v" style={{ color: "#4ade80" }}>{topScore}</div><div className="lbs-l">Top Score</div></div>
+            <div className="lbs-cell"><div className="lbs-v" style={{ color: "#60a5fa" }}>{avgScore}</div><div className="lbs-l">Avg Score</div></div>
+            <div className="lbs-cell"><div className="lbs-v" style={{ color: "#fbbf24" }}>{avgPct}%</div><div className="lbs-l">Avg %</div></div>
+          </div>
+        )}
+
         <div className="lb-flt">
           {branches.slice(0, 8).map(b => (
             <button key={b} className={`nfb${flt === b ? " nfa" : ""}`}
@@ -634,6 +759,9 @@ function Leaderboard({ setScreen }: { setScreen: (s: Screen) => void }) {
               })}
             </div>
           )}
+        </>
+        )}
+        <div className="footer" style={{ marginTop: "2rem" }}>crafted by <span className="footer-aj">AJ</span></div>
       </div>
     </div>
   );
@@ -651,7 +779,7 @@ function Admin({
   config: TestConfig;
   setConfig: (c: TestConfig) => void;
 }) {
-  const [tab,       setTab]       = useState<"list" | "add" | "import" | "settings">("list");
+  const [tab,       setTab]       = useState<"list" | "add" | "import" | "settings" | "data">("list");
   const [editQ,     setEditQ]     = useState<Question | null>(null);
   const [search,    setSearch]    = useState("");
   const [fSec,      setFSec]      = useState<SectionFilter>("All");
@@ -729,10 +857,10 @@ function Admin({
         </div>
 
         <div className="tabs">
-          {(["list", "add", "import", "settings"] as const).map(t => (
+          {(["list", "add", "import", "settings", "data"] as const).map(t => (
             <button key={t} className={`tab${tab === t ? " tab-a" : ""}`}
               onClick={() => { setTab(t); setEditQ(null); }}>
-              {t === "list" ? "📋 All Questions" : t === "add" ? "➕ Add Question" : t === "import" ? "📥 Bulk Import" : "⚙ Settings"}
+              {t === "list" ? "📋 Questions" : t === "add" ? "➕ Add" : t === "import" ? "📥 Import" : t === "settings" ? "⚙ Settings" : "📊 Data"}
             </button>
           ))}
           <button className="tab tab-d" onClick={() => {
@@ -853,9 +981,172 @@ function Admin({
             <div style={{ marginTop: "1rem", padding: ".75rem", background: "#131e30", borderRadius: 8, fontSize: ".75rem", color: "#64748b" }}>
               💡 <b style={{ color: "#94a3b8" }}>Tip:</b> You can only pick up to the number of questions available in the bank. Add more questions via "Add Question" or "Bulk Import" to increase the limit.
             </div>
+
+            <div style={{ marginTop: "1.5rem", background: FB_CONFIGURED ? "#0d2b1e" : "#1a1200", border: `1px solid ${FB_CONFIGURED ? "#166534" : "#92400e"}`, borderRadius: 10, padding: "1.1rem" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: ".7rem" }}>
+                <span style={{ fontSize: "1.1rem" }}>{FB_CONFIGURED ? "🔥" : "⚙️"}</span>
+                <b style={{ color: FB_CONFIGURED ? "#4ade80" : "#fbbf24", fontSize: ".9rem" }}>
+                  {FB_CONFIGURED ? "Firebase Connected ✓" : "Firebase Setup — Enable Shared Leaderboard"}
+                </b>
+              </div>
+              {!FB_CONFIGURED ? (
+                <div style={{ fontSize: ".78rem", color: "#94a3b8", lineHeight: 1.7 }}>
+                  <b style={{ color: "#f1f5f9" }}>Steps to enable real-time data across all devices:</b><br />
+                  1. Go to <a href="https://console.firebase.google.com" target="_blank" rel="noreferrer" style={{ color: "#60a5fa" }}>console.firebase.google.com</a><br />
+                  2. Click <b style={{ color: "#f1f5f9" }}>"Add project"</b> → name it "ddcet-test" → Create<br />
+                  3. Click <b style={{ color: "#f1f5f9" }}>"Firestore Database"</b> → Create database → Start in test mode<br />
+                  4. Go to <b style={{ color: "#f1f5f9" }}>Project Settings</b> (gear icon) → "Your apps" → Web icon → Register app<br />
+                  5. Copy the <code>firebaseConfig</code> object<br />
+                  6. Open <b style={{ color: "#f1f5f9" }}>App.tsx</b> on GitHub → find <code>FB_CONFIG</code> at top → paste your values → commit<br />
+                  <br />
+                  <b style={{ color: "#fbbf24" }}>That's it!</b> All scores will then sync across every student's device automatically.
+                </div>
+              ) : (
+                <div style={{ fontSize: ".78rem", color: "#4ade80" }}>
+                  All student scores are syncing to Firestore in real-time. View data in the 📊 Data tab.
+                </div>
+              )}
+            </div>
           </div>
         )}
+
+        {tab === "data" && <DataViewer />}
+
+        <div className="footer" style={{ marginTop: "2rem" }}>crafted by <span className="footer-aj">AJ</span></div>
       </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
+// DATA VIEWER
+// ═══════════════════════════════════════════════
+function DataViewer() {
+  const [scores, setScores] = useState<ScoreEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sortBy, setSortBy] = useState<"score" | "date" | "name">("score");
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    loadScoresRemote().then(s => { setScores(s); setLoading(false); });
+  }, []);
+
+  const sorted = [...scores]
+    .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.college.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => {
+      if (sortBy === "score") return b.score - a.score;
+      if (sortBy === "name")  return a.name.localeCompare(b.name);
+      return b.date.localeCompare(a.date);
+    });
+
+  const clearAll = async () => {
+    if (!window.confirm("Delete ALL submission data permanently?")) return;
+    await clearScoresRemote();
+    setScores([]);
+  };
+
+  const exportCSV = () => {
+    const header = "Name,Branch,College,Score,Correct,Wrong,Skipped,Total,Percentage,TimeTaken(min),Date";
+    const rows = scores.map(s =>
+      [s.name, s.branch, s.college, s.score.toFixed(1), s.correct, s.wrong, s.unattempted,
+       s.total, Math.round((s.score / (s.total * 2)) * 100) + "%",
+       Math.floor(s.timeTaken / 60), s.date].join(",")
+    );
+    const csv = [header, ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url;
+    a.download = `ddcet_results_${new Date().toLocaleDateString("en-IN").replace(/\//g,"-")}.csv`;
+    a.click(); URL.revokeObjectURL(url);
+  };
+
+  const total   = scores.length;
+  const avgPct  = total ? Math.round(scores.reduce((a,b) => a + (b.score/(b.total*2))*100, 0) / total) : 0;
+  const passed  = scores.filter(s => (s.score/(s.total*2))*100 >= 40).length;
+  const branches = Object.entries(
+    scores.reduce((acc, s) => { acc[s.branch] = (acc[s.branch] || 0) + 1; return acc; }, {} as Record<string,number>)
+  ).sort((a,b) => b[1]-a[1]);
+
+  return (
+    <div className="adm-box">
+      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:"1rem", flexWrap:"wrap" }}>
+        <h3 style={{ color:"#f1f5f9", fontSize:"1.05rem", flex:1 }}>📊 Submission Data</h3>
+        <button className="btn-out" style={{ fontSize:".75rem", padding:".35rem .8rem" }} onClick={exportCSV} disabled={!scores.length}>⬇ Export CSV</button>
+        <button className="btn-clr-lb" onClick={clearAll} disabled={!scores.length}>🗑 Clear All</button>
+      </div>
+
+      {loading ? (
+        <div style={{ padding: "3rem", textAlign: "center" }}><Dots /></div>
+      ) : total === 0 ? (
+        <div className="empty">No submissions yet. Share your test link with students!</div>
+      ) : (
+        <>
+          {/* Summary cards */}
+          <div className="dv-summary">
+            <div className="dv-card"><div className="dv-val">{total}</div><div className="dv-lbl">Total Attempts</div></div>
+            <div className="dv-card"><div className="dv-val" style={{color:"#4ade80"}}>{passed}</div><div className="dv-lbl">Passed (≥40%)</div></div>
+            <div className="dv-card"><div className="dv-val" style={{color:"#f87171"}}>{total-passed}</div><div className="dv-lbl">Below 40%</div></div>
+            <div className="dv-card"><div className="dv-val" style={{color:"#fbbf24"}}>{avgPct}%</div><div className="dv-lbl">Avg Score %</div></div>
+          </div>
+
+          {/* Branch breakdown */}
+          <div style={{ marginBottom:"1rem" }}>
+            <div style={{ fontSize:".72rem", color:"#64748b", textTransform:"uppercase", fontWeight:700, marginBottom:6 }}>By Branch</div>
+            <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+              {branches.map(([br, cnt]) => (
+                <div key={br} style={{ background:"#131e30", borderRadius:6, padding:"3px 10px", fontSize:".72rem", color:"#94a3b8" }}>
+                  {br.split(" ")[0]} <b style={{color:"#60a5fa"}}>{cnt}</b>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Search + sort */}
+          <div style={{ display:"flex", gap:8, marginBottom:".75rem", flexWrap:"wrap" }}>
+            <input className="fi" placeholder="🔍 Search by name or college..." value={search}
+              onChange={e => setSearch(e.target.value)} style={{ flex:1, minWidth:180 }} />
+            {(["score","date","name"] as const).map(s => (
+              <button key={s} className={`nfb${sortBy===s?" nfa":""}`} onClick={() => setSortBy(s)}>
+                {s==="score"?"Top Score":s==="date"?"Latest":"A-Z"}
+              </button>
+            ))}
+          </div>
+
+          {/* Table */}
+          <div style={{ overflowX:"auto" }}>
+            <table className="dv-table">
+              <thead>
+                <tr><th>#</th><th>Name</th><th>Branch</th><th>College</th><th>Score</th><th>%</th><th>C</th><th>W</th><th>Skip</th><th>Time</th><th>Date</th></tr>
+              </thead>
+              <tbody>
+                {sorted.map((s, i) => {
+                  const pct = Math.round((s.score / (s.total * 2)) * 100);
+                  return (
+                    <tr key={i} className={pct >= 60 ? "dv-pass" : pct >= 40 ? "dv-avg" : "dv-fail"}>
+                      <td style={{color:"#64748b"}}>{i+1}</td>
+                      <td style={{color:"#f1f5f9",fontWeight:600}}>{s.name}</td>
+                      <td style={{color:"#94a3b8",fontSize:".72rem"}}>{s.branch.split(" ").slice(0,2).join(" ")}</td>
+                      <td style={{color:"#64748b",fontSize:".72rem"}}>{s.college !== "—" ? s.college : "—"}</td>
+                      <td style={{color:"#60a5fa",fontWeight:700}}>{s.score.toFixed(1)}</td>
+                      <td style={{color: pct>=60?"#4ade80":pct>=40?"#fbbf24":"#f87171",fontWeight:700}}>{pct}%</td>
+                      <td style={{color:"#4ade80"}}>{s.correct}</td>
+                      <td style={{color:"#f87171"}}>{s.wrong}</td>
+                      <td style={{color:"#94a3b8"}}>{s.unattempted}</td>
+                      <td style={{color:"#64748b"}}>{Math.floor(s.timeTaken/60)}m</td>
+                      <td style={{color:"#64748b",fontSize:".7rem"}}>{s.date}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{fontSize:".7rem",color:"#475569",marginTop:8}}>
+            {FB_CONFIGURED
+              ? "🔥 Data stored in Firebase — visible across all devices in real-time."
+              : "⚠ Local mode — data stored per-browser. Set up Firebase in Admin → Settings for shared data."}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -1140,6 +1431,30 @@ code{font-size:.83em;background:#1e293b;padding:1px 6px;border-radius:4px;color:
 .cfg-btn:hover{border-color:#3b82f6;color:#60a5fa;}
 .cfg-val{min-width:46px;text-align:center;font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:800;color:#f1f5f9;background:#0e1a2e;border-radius:8px;padding:4px 8px;border:1.5px solid #1e2d45;}
 .cfg-total{margin-top:12px;padding:.75rem 1rem;background:#131e30;border-radius:8px;font-size:.85rem;color:#94a3b8;text-align:center;}
+.footer{text-align:center;font-size:.72rem;color:#1e2d45;padding:.8rem;letter-spacing:.08em;text-transform:lowercase;}
+.footer-aj{font-family:'Syne',sans-serif;font-weight:800;font-size:.85rem;background:linear-gradient(135deg,#3b82f6,#8b5cf6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.fb-banner{padding:.65rem 1rem;border-radius:8px;font-size:.77rem;margin-bottom:.9rem;background:#2d1800;border:1px solid #92400e;color:#fbbf24;}
+.fb-banner a{color:#fbbf24;font-weight:700;}
+.fb-ok{background:#0d2b1e;border-color:#166534;color:#4ade80;}
+.btn-clr-lb{padding:.35rem .8rem;background:#2d0a0a;border:1px solid #7f1d1d;border-radius:7px;color:#f87171;font-size:.73rem;font-weight:600;cursor:pointer;white-space:nowrap;}
+.btn-clr-lb:hover{background:#3d0f0f;}
+.lb-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:.9rem;}
+.lbs-cell{background:#131e30;border-radius:10px;padding:.75rem .4rem;text-align:center;}
+.lbs-v{font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:800;color:#f1f5f9;}
+.lbs-l{font-size:.62rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin-top:2px;}
+@media(max-width:480px){.lb-stats{grid-template-columns:repeat(2,1fr);}}
+.dv-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-bottom:1rem;}
+.dv-card{background:#131e30;border-radius:10px;padding:.75rem .4rem;text-align:center;}
+.dv-val{font-family:'Syne',sans-serif;font-size:1.3rem;font-weight:800;color:#f1f5f9;}
+.dv-lbl{font-size:.62rem;color:#64748b;text-transform:uppercase;letter-spacing:.04em;margin-top:2px;}
+@media(max-width:480px){.dv-summary{grid-template-columns:repeat(2,1fr);}}
+.dv-table{width:100%;border-collapse:collapse;font-size:.75rem;}
+.dv-table th{background:#131e30;color:#64748b;font-weight:700;text-transform:uppercase;font-size:.62rem;letter-spacing:.04em;padding:.5rem .6rem;text-align:left;white-space:nowrap;}
+.dv-table td{padding:.55rem .6rem;border-bottom:1px solid #0a111e;white-space:nowrap;}
+.dv-table tr:hover td{background:#131e3033;}
+.dv-pass td:first-child{border-left:2px solid #4ade80;}
+.dv-avg  td:first-child{border-left:2px solid #fbbf24;}
+.dv-fail td:first-child{border-left:2px solid #f87171;}
     `}</style>
   );
 }
