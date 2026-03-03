@@ -15,11 +15,13 @@ interface Student {
   name: string;
   branch: string;
   college: string;
+  enrollment: string;
 }
 interface ScoreEntry {
   name: string;
   branch: string;
   college: string;
+  enrollment: string;
   score: number;
   correct: number;
   wrong: number;
@@ -27,6 +29,11 @@ interface ScoreEntry {
   total: number;
   timeTaken: number;
   date: string;
+  sciScore: number; sciCorrect: number; sciTotal: number;
+  mathScore: number; mathCorrect: number; mathTotal: number;
+  engScore: number; engCorrect: number; engTotal: number;
+  answers: Record<number, number>;   // index → chosen option
+  questions: Question[];             // the actual questions attempted
 }
 type Screen = "home" | "test" | "result" | "leaderboard" | "admin";
 type SectionFilter = "All" | "Science" | "Math" | "English";
@@ -332,14 +339,15 @@ export default function App() {
 // HOME
 // ═══════════════════════════════════════════════
 function Home({ setScreen, config }: { setScreen: (s: Screen) => void; config: TestConfig }) {
-  const [name, setName]       = useState("");
-  const [branch, setBranch]   = useState("");
-  const [college, setCollege] = useState("");
+  const [name, setName]           = useState("");
+  const [branch, setBranch]       = useState("");
+  const [college, setCollege]     = useState("");
+  const [enrollment, setEnroll]   = useState("");
   const [nameErr, setNameErr]     = useState("");
   const [branchErr, setBranchErr] = useState("");
-  const [showAdm, setShowAdm] = useState(false);
-  const [pw, setPw]           = useState("");
-  const [pwErr, setPwErr]     = useState("");
+  const [showAdm, setShowAdm]     = useState(false);
+  const [pw, setPw]               = useState("");
+  const [pwErr, setPwErr]         = useState("");
 
 
   const start = () => {
@@ -347,7 +355,7 @@ function Home({ setScreen, config }: { setScreen: (s: Screen) => void; config: T
     if (!name.trim())  { setNameErr("Name is required"); ok = false; } else setNameErr("");
     if (!branch)       { setBranchErr("Select your branch"); ok = false; } else setBranchErr("");
     if (!ok) return;
-    const student: Student = { name: name.trim(), branch, college };
+    const student: Student = { name: name.trim(), branch, college, enrollment: enrollment.trim() };
     sessionStorage.setItem("ddcet_student", JSON.stringify(student));
     setScreen("test");
   };
@@ -406,6 +414,12 @@ function Home({ setScreen, config }: { setScreen: (s: Screen) => void; config: T
             </div>
 
             <div className="fg">
+              <label className="fl">Enrollment Number (optional)</label>
+              <input className="fi" placeholder="e.g. 22XXXXXX"
+                value={enrollment} onChange={e => setEnroll(e.target.value)} />
+            </div>
+
+            <div className="fg">
               <label className="fl">College Name (optional)</label>
               <input className="fi" placeholder="Your college / institute name"
                 value={college} onChange={e => setCollege(e.target.value)} />
@@ -438,7 +452,7 @@ function Home({ setScreen, config }: { setScreen: (s: Screen) => void; config: T
 // ═══════════════════════════════════════════════
 function Test({ setScreen, questions, config }: { setScreen: (s: Screen) => void; questions: Question[]; config: TestConfig }) {
   const student: Student = JSON.parse(
-    sessionStorage.getItem("ddcet_student") || '{"name":"Student","branch":"—","college":""}'
+    sessionStorage.getItem("ddcet_student") || '{"name":"Student","branch":"—","college":"","enrollment":""}'
   );
 
   const [testQs] = useState<Question[]>(() => {
@@ -446,7 +460,7 @@ function Test({ setScreen, questions, config }: { setScreen: (s: Screen) => void
     const sci  = pick(questions.filter(q => q.section === "Science"), config.science);
     const math = pick(questions.filter(q => q.section === "Math"), config.math);
     const eng  = pick(questions.filter(q => q.section === "English"), config.english);
-    return shuffle([...sci, ...math, ...eng]);
+    return [...sci, ...math, ...eng]; // keep sections together then shuffle display
   });
 
   const [ans,   setAns]   = useState<Record<number, number>>({});
@@ -456,7 +470,29 @@ function Test({ setScreen, questions, config }: { setScreen: (s: Screen) => void
   const [done,  setDone]  = useState(false);
   const [panel, setPanel] = useState(false);
   const [sf,    setSf]    = useState<SectionFilter>("All");
+  const [warn,  setWarn]  = useState("");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // ── Anti-cheat: block right-click, text selection, devtools shortcut ──
+  useEffect(() => {
+    const noCtx  = (e: MouseEvent)    => e.preventDefault();
+    const noKey  = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && ["c","u","s","a","p"].includes(e.key.toLowerCase())) e.preventDefault();
+      if (e.key === "F12" || (e.ctrlKey && e.shiftKey && ["i","j","c"].includes(e.key.toLowerCase()))) e.preventDefault();
+    };
+    const noSel  = (e: Event)         => e.preventDefault();
+    const onVis  = () => { if (document.visibilityState === "hidden") setWarn("⚠ Tab switching detected!"); };
+    document.addEventListener("contextmenu",    noCtx);
+    document.addEventListener("keydown",        noKey);
+    document.addEventListener("selectstart",    noSel);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      document.removeEventListener("contextmenu",    noCtx);
+      document.removeEventListener("keydown",        noKey);
+      document.removeEventListener("selectstart",    noSel);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
 
   const submit = useCallback((_auto = false) => {
     if (done) return;
@@ -464,17 +500,44 @@ function Test({ setScreen, questions, config }: { setScreen: (s: Screen) => void
     setDone(true);
 
     let c = 0, w = 0, u = 0;
+    let sciC = 0, sciW = 0, sciU = 0;
+    let mathC = 0, mathW = 0, mathU = 0;
+    let engC = 0, engW = 0, engU = 0;
+
     testQs.forEach((q, i) => {
-      if (ans[i] === undefined) u++;
-      else if (ans[i] === q.answer) c++;
-      else w++;
+      const chosen = ans[i];
+      const correct = chosen === q.answer;
+      const skipped = chosen === undefined;
+      if (skipped) u++; else if (correct) c++; else w++;
+      if (q.section === "Science") {
+        if (skipped) sciU++; else if (correct) sciC++; else sciW++;
+      } else if (q.section === "Math") {
+        if (skipped) mathU++; else if (correct) mathC++; else mathW++;
+      } else {
+        if (skipped) engU++; else if (correct) engC++; else engW++;
+      }
     });
-    const score = Math.max(0, c * 2 - w * 0.5);
+
+    const sciTotal  = testQs.filter(q => q.section === "Science").length;
+    const mathTotal = testQs.filter(q => q.section === "Math").length;
+    const engTotal  = testQs.filter(q => q.section === "English").length;
+
+    const score     = Math.max(0, c * 2 - w * 0.5);
+    const sciScore  = Math.max(0, sciC * 2 - sciW * 0.5);
+    const mathScore = Math.max(0, mathC * 2 - mathW * 0.5);
+    const engScore  = Math.max(0, engC * 2 - engW * 0.5);
+
     const entry: ScoreEntry = {
-      name: student.name, branch: student.branch, college: student.college || "—",
+      name: student.name, branch: student.branch,
+      college: student.college || "—", enrollment: student.enrollment || "—",
       score, correct: c, wrong: w, unattempted: u,
       total: testQs.length, timeTaken: TIMER_SEC - tLeft,
       date: new Date().toLocaleDateString("en-IN"),
+      sciScore, sciCorrect: sciC, sciTotal,
+      mathScore, mathCorrect: mathC, mathTotal,
+      engScore, engCorrect: engC, engTotal,
+      answers: { ...ans },
+      questions: testQs,
     };
     sessionStorage.setItem("ddcet_result", JSON.stringify(entry));
     void saveScore(entry);
@@ -509,7 +572,13 @@ function Test({ setScreen, questions, config }: { setScreen: (s: Screen) => void
     : testQs.map((qq, i) => ({ qq, i })).filter(({ qq }) => qq.section === sf);
 
   return (
-    <div className="test-root">
+    <div className="test-root" style={{ userSelect: "none", WebkitUserSelect: "none" }}>
+      {/* Anti-cheat warning */}
+      {warn && (
+        <div className="cheat-warn" onClick={() => setWarn("")}>
+          {warn} &nbsp;<small>(click to dismiss)</small>
+        </div>
+      )}
       {/* Header */}
       <div className="t-hdr">
         <div className="thdr-l">
@@ -607,6 +676,9 @@ function Test({ setScreen, questions, config }: { setScreen: (s: Screen) => void
 // ═══════════════════════════════════════════════
 function Result({ setScreen }: { setScreen: (s: Screen) => void }) {
   const r = JSON.parse(sessionStorage.getItem("ddcet_result") || "null") as ScoreEntry | null;
+  const [tab, setTab] = useState<"summary" | "review">("summary");
+  const [reviewFlt, setReviewFlt] = useState<"all" | "wrong" | "correct" | "skipped">("all");
+
   if (!r) return <div className="pg"><p style={{ color: "#64748b" }}>No result found.</p></div>;
 
   const pct   = Math.round((r.score / (r.total * 2)) * 100);
@@ -615,47 +687,238 @@ function Result({ setScreen }: { setScreen: (s: Screen) => void }) {
   const em    = pct >= 75 ? "🎉" : pct >= 55 ? "👍" : pct >= 35 ? "📖" : "💪";
   const circ  = 2 * Math.PI * 50;
 
+  const secs = [
+    { label: "Science", score: r.sciScore,  correct: r.sciCorrect,  total: r.sciTotal,  color: "#3b82f6" },
+    { label: "Math",    score: r.mathScore, correct: r.mathCorrect, total: r.mathTotal, color: "#8b5cf6" },
+    { label: "English", score: r.engScore,  correct: r.engCorrect,  total: r.engTotal,  color: "#10b981" },
+  ];
+
+  const reviewQs = (r.questions || []).map((q, i) => {
+    const chosen = r.answers?.[i];
+    const isCorrect = chosen === q.answer;
+    const isSkipped = chosen === undefined;
+    return { q, i, chosen, isCorrect, isSkipped };
+  }).filter(({ isCorrect, isSkipped }) => {
+    if (reviewFlt === "wrong")   return !isCorrect && !isSkipped;
+    if (reviewFlt === "correct") return isCorrect;
+    if (reviewFlt === "skipped") return isSkipped;
+    return true;
+  });
+
+  const printPDF = () => {
+    const w = window.open("", "_blank");
+    if (!w) return;
+    const rows = (r.questions || []).map((q, i) => {
+      const chosen = r.answers?.[i];
+      const ok = chosen === q.answer;
+      const skipped = chosen === undefined;
+      const status = skipped ? "Skipped" : ok ? "Correct" : "Wrong";
+      const color = skipped ? "#888" : ok ? "#16a34a" : "#dc2626";
+      return `<tr style="border-bottom:1px solid #e2e8f0">
+        <td style="padding:6px 4px;font-size:12px;color:#374151">${i+1}. ${q.text}</td>
+        <td style="padding:6px 4px;font-size:11px;color:#6b7280">${q.options[q.answer]}</td>
+        <td style="padding:6px 4px;font-size:11px;color:${skipped?"#888":ok?"#6b7280":"#dc2626"}">${skipped?"—":q.options[chosen]}</td>
+        <td style="padding:6px 4px;font-size:11px;font-weight:700;color:${color}">${status}</td>
+      </tr>`;
+    }).join("");
+    w.document.write(`<!DOCTYPE html><html><head><title>DDCET Result — ${r.name}</title>
+    <style>body{font-family:Arial,sans-serif;margin:0;padding:20px;color:#111}
+    @media print{.no-print{display:none}}</style></head><body>
+    <div style="text-align:center;margin-bottom:16px;border-bottom:2px solid #1d4ed8;padding-bottom:12px">
+      <h2 style="color:#1d4ed8;margin:0">DDCET Mock Test — Result Card</h2>
+      <p style="color:#6b7280;margin:4px 0;font-size:13px">Gujarat Technological University</p>
+    </div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+      <tr><td style="padding:4px 8px;font-size:13px"><b>Name:</b> ${r.name}</td>
+          <td style="padding:4px 8px;font-size:13px"><b>Enrollment:</b> ${r.enrollment||"—"}</td></tr>
+      <tr><td style="padding:4px 8px;font-size:13px"><b>Branch:</b> ${r.branch}</td>
+          <td style="padding:4px 8px;font-size:13px"><b>College:</b> ${r.college}</td></tr>
+      <tr><td style="padding:4px 8px;font-size:13px"><b>Date:</b> ${r.date}</td>
+          <td style="padding:4px 8px;font-size:13px"><b>Time Taken:</b> ${Math.floor(r.timeTaken/60)}m ${r.timeTaken%60}s</td></tr>
+    </table>
+    <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 16px;text-align:center;min-width:90px">
+        <div style="font-size:22px;font-weight:800;color:#16a34a">${r.score.toFixed(1)}</div>
+        <div style="font-size:11px;color:#6b7280">Score / ${r.total*2}</div></div>
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 16px;text-align:center;min-width:90px">
+        <div style="font-size:22px;font-weight:800;color:#1d4ed8">${pct}%</div>
+        <div style="font-size:11px;color:#6b7280">Percentage</div></div>
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px;text-align:center;min-width:90px">
+        <div style="font-size:22px;font-weight:800;color:#111">Grade ${grade}</div>
+        <div style="font-size:11px;color:#6b7280">Grade</div></div>
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 16px;text-align:center;min-width:80px">
+        <div style="font-size:20px;font-weight:700;color:#16a34a">${r.correct}</div>
+        <div style="font-size:11px;color:#6b7280">Correct</div></div>
+      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 16px;text-align:center;min-width:80px">
+        <div style="font-size:20px;font-weight:700;color:#dc2626">${r.wrong}</div>
+        <div style="font-size:11px;color:#6b7280">Wrong</div></div>
+      <div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:10px 16px;text-align:center;min-width:80px">
+        <div style="font-size:20px;font-weight:700;color:#6b7280">${r.unattempted}</div>
+        <div style="font-size:11px;color:#6b7280">Skipped</div></div>
+    </div>
+    <div style="margin-bottom:14px">
+      <b style="font-size:13px">Section-wise Score:</b>
+      <div style="display:flex;gap:10px;margin-top:6px;flex-wrap:wrap">
+        ${secs.map(s=>`<div style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:6px;padding:8px 12px;min-width:110px">
+          <div style="font-size:13px;font-weight:700">${s.label}</div>
+          <div style="font-size:12px;color:#6b7280">${s.score.toFixed(1)} / ${s.total*2} &nbsp;·&nbsp; ${s.correct}/${s.total} correct</div>
+        </div>`).join("")}
+      </div>
+    </div>
+    <h3 style="font-size:13px;border-top:1px solid #e5e7eb;padding-top:10px;margin-bottom:6px">Answer Review</h3>
+    <table style="width:100%;border-collapse:collapse">
+      <thead><tr style="background:#f3f4f6">
+        <th style="padding:6px 4px;font-size:11px;text-align:left">Question</th>
+        <th style="padding:6px 4px;font-size:11px;text-align:left">Correct Answer</th>
+        <th style="padding:6px 4px;font-size:11px;text-align:left">Your Answer</th>
+        <th style="padding:6px 4px;font-size:11px;text-align:left">Status</th>
+      </tr></thead><tbody>${rows}</tbody>
+    </table>
+    <div class="no-print" style="text-align:center;margin-top:20px">
+      <button onclick="window.print()" style="background:#1d4ed8;color:#fff;border:none;padding:10px 28px;border-radius:8px;font-size:14px;cursor:pointer">🖨 Print / Save PDF</button>
+    </div>
+    <p style="text-align:center;font-size:10px;color:#9ca3af;margin-top:16px">Generated by DDCET Mock Test Platform · crafted by AJ</p>
+    </body></html>`);
+    w.document.close();
+  };
+
   return (
-    <div className="pg res-pg">
-      <div className="res-card">
-        <div className="res-top">
-          <div style={{ fontSize: "2.6rem" }}>{em}</div>
-          <div className="res-nm">{r.name}</div>
-          <div className="res-br">{r.branch}{r.college !== "—" ? ` · ${r.college}` : ""} · {r.date}</div>
-        </div>
-        <div className="ring-wrap">
-          <svg viewBox="0 0 120 120" style={{ width: 140, height: 140 }}>
-            <circle cx="60" cy="60" r="50" fill="none" stroke="#1e293b" strokeWidth="10" />
-            <circle cx="60" cy="60" r="50" fill="none" stroke={gc} strokeWidth="10"
-              strokeDasharray={circ} strokeDashoffset={circ * (1 - pct / 100)}
-              strokeLinecap="round" transform="rotate(-90 60 60)"
-              style={{ transition: "stroke-dashoffset 1.2s ease" }} />
-          </svg>
-          <div className="ring-in">
-            <div className="ring-sc">{r.score.toFixed(1)}</div>
-            <div className="ring-tot">/{r.total * 2}</div>
-          </div>
-        </div>
-        <div className="grade-bdg" style={{ color: gc, borderColor: gc }}>Grade {grade} · {pct}%</div>
-        <div className="res-grid">
-          {([
-            ["Correct",  String(r.correct),                 "#4ade80"],
-            ["Wrong",    String(r.wrong),                   "#f87171"],
-            ["Skipped",  String(r.unattempted),             "#94a3b8"],
-            ["+Marks",   (r.correct * 2).toFixed(1),        "#fbbf24"],
-            ["−Marks",   (r.wrong * 0.5).toFixed(1),        "#f87171"],
-            ["Time",     `${Math.floor(r.timeTaken / 60)}m`,"#60a5fa"],
-          ] as [string, string, string][]).map(([l, v, c]) => (
-            <div key={l} className="rg-cell">
-              <div className="rg-v" style={{ color: c }}>{v}</div>
-              <div className="rg-l">{l}</div>
-            </div>
+    <div className="pg res-pg" style={{ alignItems: "flex-start", padding: "1.5rem" }}>
+      <div className="res-card" style={{ maxWidth: 680 }}>
+        {/* Tabs */}
+        <div style={{ display:"flex", gap:8, marginBottom:"1.2rem" }}>
+          {(["summary","review"] as const).map(t => (
+            <button key={t} className={`tab${tab===t?" tab-a":""}`} onClick={() => setTab(t)}>
+              {t === "summary" ? "📊 Summary" : "🔍 Answer Review"}
+            </button>
           ))}
+          <button className="btn-out" style={{ marginLeft:"auto", fontSize:".8rem", padding:".4rem .9rem" }} onClick={printPDF}>
+            📄 Download PDF
+          </button>
         </div>
-        <div className="res-acts">
-          <button className="btn-prim" style={{ flex: 1 }} onClick={() => setScreen("home")}>Try Again</button>
-          <button className="btn-out" onClick={() => setScreen("leaderboard")}>🏆 Leaderboard</button>
-        </div>
+
+        {tab === "summary" && (
+          <>
+            <div className="res-top">
+              <div style={{ fontSize: "2.6rem" }}>{em}</div>
+              <div className="res-nm">{r.name}</div>
+              <div className="res-br">
+                {r.enrollment && r.enrollment !== "—" ? `#${r.enrollment} · ` : ""}
+                {r.branch}{r.college !== "—" ? ` · ${r.college}` : ""} · {r.date}
+              </div>
+            </div>
+            <div className="ring-wrap">
+              <svg viewBox="0 0 120 120" style={{ width: 140, height: 140 }}>
+                <circle cx="60" cy="60" r="50" fill="none" stroke="#1e293b" strokeWidth="10" />
+                <circle cx="60" cy="60" r="50" fill="none" stroke={gc} strokeWidth="10"
+                  strokeDasharray={circ} strokeDashoffset={circ * (1 - pct / 100)}
+                  strokeLinecap="round" transform="rotate(-90 60 60)"
+                  style={{ transition: "stroke-dashoffset 1.2s ease" }} />
+              </svg>
+              <div className="ring-in">
+                <div className="ring-sc">{r.score.toFixed(1)}</div>
+                <div className="ring-tot">/{r.total * 2}</div>
+              </div>
+            </div>
+            <div className="grade-bdg" style={{ color: gc, borderColor: gc }}>Grade {grade} · {pct}%</div>
+
+            {/* Overall stats */}
+            <div className="res-grid">
+              {([
+                ["Correct",  String(r.correct),                 "#4ade80"],
+                ["Wrong",    String(r.wrong),                   "#f87171"],
+                ["Skipped",  String(r.unattempted),             "#94a3b8"],
+                ["+Marks",   (r.correct * 2).toFixed(1),        "#fbbf24"],
+                ["−Marks",   (r.wrong * 0.5).toFixed(1),        "#f87171"],
+                ["Time",     `${Math.floor(r.timeTaken / 60)}m`,"#60a5fa"],
+              ] as [string, string, string][]).map(([l, v, c]) => (
+                <div key={l} className="rg-cell">
+                  <div className="rg-v" style={{ color: c }}>{v}</div>
+                  <div className="rg-l">{l}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* Section breakdown */}
+            <div style={{ marginBottom:"1.2rem" }}>
+              <div style={{ fontSize:".72rem", color:"#64748b", textTransform:"uppercase", fontWeight:700, marginBottom:8 }}>Section-wise Score</div>
+              {secs.map(s => {
+                const sp = s.total > 0 ? Math.round((s.score / (s.total * 2)) * 100) : 0;
+                return (
+                  <div key={s.label} className="sec-row">
+                    <div className="sec-row-left">
+                      <span className={`sec-tag sec-${s.label}`}>{s.label}</span>
+                      <span style={{ fontSize:".78rem", color:"#94a3b8" }}>{s.correct}/{s.total} correct</span>
+                    </div>
+                    <div className="sec-row-bar">
+                      <div className="sec-bar-bg">
+                        <div className="sec-bar-fill" style={{ width:`${sp}%`, background: s.color }} />
+                      </div>
+                      <span style={{ fontSize:".8rem", fontWeight:700, color: s.color, minWidth:40, textAlign:"right" }}>{s.score.toFixed(0)}/{s.total*2}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="res-acts">
+              <button className="btn-prim" style={{ flex: 1 }} onClick={() => setScreen("home")}>Try Again</button>
+              <button className="btn-out" onClick={() => setScreen("leaderboard")}>🏆 Leaderboard</button>
+            </div>
+          </>
+        )}
+
+        {tab === "review" && (
+          <>
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", marginBottom:"1rem" }}>
+              {(["all","correct","wrong","skipped"] as const).map(f => (
+                <button key={f} className={`nfb${reviewFlt===f?" nfa":""}`}
+                  style={{ fontSize:".75rem" }} onClick={() => setReviewFlt(f)}>
+                  {f==="all" ? `All (${(r.questions||[]).length})`
+                   : f==="correct" ? `✓ Correct (${r.correct})`
+                   : f==="wrong"   ? `✗ Wrong (${r.wrong})`
+                   : `— Skipped (${r.unattempted})`}
+                </button>
+              ))}
+            </div>
+            <div style={{ display:"flex", flexDirection:"column", gap:10, maxHeight:"65vh", overflowY:"auto" }}>
+              {reviewQs.length === 0 && <div className="empty">No questions in this filter.</div>}
+              {reviewQs.map(({ q, i, chosen, isCorrect, isSkipped }) => (
+                <div key={i} className={`rev-item${isCorrect?" rev-ok":isSkipped?" rev-skip":" rev-wrong"}`}>
+                  <div className="rev-top">
+                    <span className={`sec-tag sec-${q.section}`}>{q.section}</span>
+                    <span className="rev-qnum">Q{i+1}</span>
+                    <span className={`rev-status${isCorrect?" rev-s-ok":isSkipped?" rev-s-skip":" rev-s-wrong"}`}>
+                      {isCorrect ? "✓ Correct" : isSkipped ? "— Skipped" : "✗ Wrong"}
+                    </span>
+                  </div>
+                  <div className="rev-qtxt">{q.text}</div>
+                  <div className="rev-opts">
+                    {q.options.map((opt, j) => {
+                      const isAns = j === q.answer;
+                      const isChosen = j === chosen;
+                      let cls = "rev-opt";
+                      if (isAns) cls += " rev-opt-correct";
+                      else if (isChosen && !isAns) cls += " rev-opt-wrong";
+                      return (
+                        <div key={j} className={cls}>
+                          <span className="rev-ol">{["A","B","C","D"][j]}</span>
+                          <span>{opt}</span>
+                          {isAns && <span className="rev-tag-ok">✓ Correct</span>}
+                          {isChosen && !isAns && <span className="rev-tag-wrong">✗ Your answer</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop:"1rem", display:"flex", gap:8 }}>
+              <button className="btn-prim" style={{flex:1}} onClick={() => setScreen("home")}>Try Again</button>
+              <button className="btn-out" onClick={printPDF}>📄 Download PDF</button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -676,12 +939,6 @@ function Leaderboard({ setScreen }: { setScreen: (s: Screen) => void }) {
   const branches = ["All", ...Array.from(new Set(scores.map(s => s.branch)))];
   const shown = flt === "All" ? scores : scores.filter(s => s.branch === flt);
 
-  const clearBoard = async () => {
-    if (!window.confirm("Clear ALL leaderboard scores? This cannot be undone.")) return;
-    await clearScoresRemote();
-    setScores([]);
-  };
-
   const avgScore = scores.length ? (scores.reduce((a, b) => a + b.score, 0) / scores.length).toFixed(1) : "—";
   const topScore = scores.length ? scores[0].score.toFixed(1) : "—";
   const avgPct   = scores.length ? Math.round(scores.reduce((a, b) => a + (b.score / (b.total * 2)) * 100, 0) / scores.length) : 0;
@@ -692,20 +949,17 @@ function Leaderboard({ setScreen }: { setScreen: (s: Screen) => void }) {
         <div className="lb-hdr-row">
           <button className="btn-bk" onClick={() => setScreen("home")}>← Back</button>
           <h2 className="lb-ttl">🏆 Leaderboard</h2>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginLeft: "auto" }}>
-            <span className="lb-cnt">{scores.length} attempts</span>
-            <button className="btn-clr-lb" onClick={clearBoard}>🗑 Clear</button>
-          </div>
+          <span className="lb-cnt" style={{ marginLeft:"auto" }}>{scores.length} attempts</span>
         </div>
 
         {!FB_CONFIGURED && (
           <div className="fb-banner">
-            ⚠️ <b>Local mode</b> — scores saved per-device only. <a href="#setup">Set up Firebase</a> for shared real-time leaderboard across all devices.
+            ⚠️ <b>Local mode</b> — scores saved per-device only. Set up Firebase for shared leaderboard.
           </div>
         )}
         {FB_CONFIGURED && (
           <div className="fb-banner fb-ok">
-            🔥 <b>Firebase active</b> — all scores synced in real-time across every device.
+            🔥 <b>Firebase active</b> — scores synced in real-time across every device.
           </div>
         )}
 
@@ -745,7 +999,10 @@ function Leaderboard({ setScreen }: { setScreen: (s: Screen) => void }) {
                     </div>
                     <div>
                       <div className="lb-nm">{s.name}</div>
-                      <div className="lb-cl">{s.college !== "—" ? s.college + " · " : ""}{s.date}</div>
+                      <div className="lb-cl">
+                        {(s.enrollment && s.enrollment !== "—") ? `#${s.enrollment} · ` : ""}
+                        {s.college !== "—" ? s.college + " · " : ""}{s.date}
+                      </div>
                     </div>
                     <div className="lb-br">{s.branch.split(" ").slice(0, 2).join(" ")}</div>
                     <div className="lb-sc">{s.score.toFixed(1)}</div>
@@ -1033,7 +1290,9 @@ function DataViewer() {
   }, []);
 
   const sorted = [...scores]
-    .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.college.toLowerCase().includes(search.toLowerCase()))
+    .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) ||
+      s.college.toLowerCase().includes(search.toLowerCase()) ||
+      (s.enrollment||"").toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
       if (sortBy === "score") return b.score - a.score;
       if (sortBy === "name")  return a.name.localeCompare(b.name);
@@ -1041,24 +1300,95 @@ function DataViewer() {
     });
 
   const clearAll = async () => {
-    if (!window.confirm("Delete ALL submission data permanently?")) return;
+    if (!window.confirm("Delete ALL submission data permanently? This cannot be undone.")) return;
     await clearScoresRemote();
     setScores([]);
   };
 
   const exportCSV = () => {
-    const header = "Name,Branch,College,Score,Correct,Wrong,Skipped,Total,Percentage,TimeTaken(min),Date";
-    const rows = scores.map(s =>
-      [s.name, s.branch, s.college, s.score.toFixed(1), s.correct, s.wrong, s.unattempted,
-       s.total, Math.round((s.score / (s.total * 2)) * 100) + "%",
-       Math.floor(s.timeTaken / 60), s.date].join(",")
-    );
+    const header = "Name,Enrollment,Branch,College,Score,MaxScore,%,Correct,Wrong,Skipped,Total,Science,Math,English,Time(min),Date";
+    const rows = scores.map(s => [
+      `"${s.name}"`,
+      s.enrollment || "—",
+      `"${s.branch}"`,
+      `"${s.college}"`,
+      s.score.toFixed(1),
+      s.total * 2,
+      Math.round((s.score / (s.total * 2)) * 100) + "%",
+      s.correct, s.wrong, s.unattempted, s.total,
+      `${(s.sciScore||0).toFixed(1)}/${(s.sciTotal||0)*2}`,
+      `${(s.mathScore||0).toFixed(1)}/${(s.mathTotal||0)*2}`,
+      `${(s.engScore||0).toFixed(1)}/${(s.engTotal||0)*2}`,
+      Math.floor(s.timeTaken / 60),
+      s.date,
+    ].join(","));
     const csv = [header, ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url;
     a.download = `ddcet_results_${new Date().toLocaleDateString("en-IN").replace(/\//g,"-")}.csv`;
     a.click(); URL.revokeObjectURL(url);
+  };
+
+  const exportPDF = () => {
+    const w = window.open("", "_blank");
+    if (!w) return;
+    const rows = sorted.map((s, i) => {
+      const pct = Math.round((s.score / (s.total * 2)) * 100);
+      const color = pct >= 60 ? "#16a34a" : pct >= 40 ? "#ca8a04" : "#dc2626";
+      const grade = pct >= 75 ? "A+" : pct >= 60 ? "A" : pct >= 45 ? "B" : pct >= 30 ? "C" : "D";
+      return `<tr style="border-bottom:1px solid #e5e7eb">
+        <td style="padding:5px 6px;font-size:11px;color:#374151;text-align:center">${i+1}</td>
+        <td style="padding:5px 6px;font-size:11px;font-weight:600;color:#111">${s.name}</td>
+        <td style="padding:5px 6px;font-size:10px;color:#6b7280">${s.enrollment||"—"}</td>
+        <td style="padding:5px 6px;font-size:10px;color:#6b7280">${s.branch.split(" ").slice(0,2).join(" ")}</td>
+        <td style="padding:5px 6px;font-size:10px;color:#6b7280">${s.college}</td>
+        <td style="padding:5px 6px;font-size:11px;font-weight:700;color:#1d4ed8;text-align:center">${s.score.toFixed(1)}/${s.total*2}</td>
+        <td style="padding:5px 6px;font-size:11px;font-weight:700;color:${color};text-align:center">${pct}%</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;color:#16a34a">${s.correct}</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;color:#dc2626">${s.wrong}</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;color:#6b7280">${s.unattempted}</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;color:#1d4ed8">${(s.sciScore||0).toFixed(0)}</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;color:#7c3aed">${(s.mathScore||0).toFixed(0)}</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;color:#059669">${(s.engScore||0).toFixed(0)}</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;font-weight:700;color:${color}">${grade}</td>
+        <td style="padding:5px 6px;font-size:10px;text-align:center;color:#6b7280">${Math.floor(s.timeTaken/60)}m</td>
+        <td style="padding:5px 6px;font-size:10px;color:#6b7280">${s.date}</td>
+      </tr>`;
+    }).join("");
+    const total2 = scores.length;
+    const avgPct2 = total2 ? Math.round(scores.reduce((a,b)=>a+(b.score/(b.total*2))*100,0)/total2) : 0;
+    const passed2 = scores.filter(s=>(s.score/(s.total*2))*100>=40).length;
+    w.document.write(`<!DOCTYPE html><html><head><title>DDCET Score Report</title>
+    <style>body{font-family:Arial,sans-serif;margin:0;padding:16px;font-size:12px}
+    table{width:100%;border-collapse:collapse}th{background:#1e3a5f;color:#fff;padding:5px 6px;font-size:10px;text-align:left}
+    tr:nth-child(even)td{background:#f9fafb}
+    @media print{.no-print{display:none}}</style></head><body>
+    <div style="text-align:center;margin-bottom:12px;padding-bottom:10px;border-bottom:2px solid #1d4ed8">
+      <h2 style="color:#1d4ed8;margin:0;font-size:18px">DDCET Mock Test — Score Report</h2>
+      <p style="color:#6b7280;margin:3px 0;font-size:11px">Gujarat Technological University · Generated ${new Date().toLocaleDateString("en-IN")}</p>
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center">
+        <div style="font-size:20px;font-weight:800;color:#1d4ed8">${total2}</div><div style="font-size:10px;color:#6b7280">Total Students</div></div>
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center">
+        <div style="font-size:20px;font-weight:800;color:#16a34a">${passed2}</div><div style="font-size:10px;color:#6b7280">Passed (≥40%)</div></div>
+      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center">
+        <div style="font-size:20px;font-weight:800;color:#dc2626">${total2-passed2}</div><div style="font-size:10px;color:#6b7280">Below 40%</div></div>
+      <div style="background:#fefce8;border:1px solid #fef08a;border-radius:6px;padding:8px 14px;min-width:90px;text-align:center">
+        <div style="font-size:20px;font-weight:800;color:#ca8a04">${avgPct2}%</div><div style="font-size:10px;color:#6b7280">Average %</div></div>
+    </div>
+    <table><thead><tr>
+      <th>#</th><th>Name</th><th>Enroll.</th><th>Branch</th><th>College</th>
+      <th>Score</th><th>%</th><th>✓</th><th>✗</th><th>Skip</th>
+      <th>Sci</th><th>Math</th><th>Eng</th><th>Grade</th><th>Time</th><th>Date</th>
+    </tr></thead><tbody>${rows}</tbody></table>
+    <div class="no-print" style="text-align:center;margin-top:16px">
+      <button onclick="window.print()" style="background:#1d4ed8;color:#fff;border:none;padding:10px 28px;border-radius:8px;font-size:14px;cursor:pointer">🖨 Print / Save as PDF</button>
+    </div>
+    <p style="text-align:center;font-size:10px;color:#9ca3af;margin-top:14px">DDCET Mock Test Platform · crafted by AJ</p>
+    </body></html>`);
+    w.document.close();
   };
 
   const total   = scores.length;
@@ -1070,9 +1400,10 @@ function DataViewer() {
 
   return (
     <div className="adm-box">
-      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:"1rem", flexWrap:"wrap" }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:"1rem", flexWrap:"wrap" }}>
         <h3 style={{ color:"#f1f5f9", fontSize:"1.05rem", flex:1 }}>📊 Submission Data</h3>
-        <button className="btn-out" style={{ fontSize:".75rem", padding:".35rem .8rem" }} onClick={exportCSV} disabled={!scores.length}>⬇ Export CSV</button>
+        <button className="btn-out" style={{ fontSize:".75rem", padding:".35rem .8rem" }} onClick={exportCSV} disabled={!scores.length}>⬇ CSV</button>
+        <button className="btn-out" style={{ fontSize:".75rem", padding:".35rem .8rem", borderColor:"#7c3aed", color:"#a78bfa" }} onClick={exportPDF} disabled={!scores.length}>📄 PDF Report</button>
         <button className="btn-clr-lb" onClick={clearAll} disabled={!scores.length}>🗑 Clear All</button>
       </div>
 
@@ -1104,7 +1435,7 @@ function DataViewer() {
 
           {/* Search + sort */}
           <div style={{ display:"flex", gap:8, marginBottom:".75rem", flexWrap:"wrap" }}>
-            <input className="fi" placeholder="🔍 Search by name or college..." value={search}
+            <input className="fi" placeholder="🔍 Search name, enrollment, college..." value={search}
               onChange={e => setSearch(e.target.value)} style={{ flex:1, minWidth:180 }} />
             {(["score","date","name"] as const).map(s => (
               <button key={s} className={`nfb${sortBy===s?" nfa":""}`} onClick={() => setSortBy(s)}>
@@ -1117,7 +1448,14 @@ function DataViewer() {
           <div style={{ overflowX:"auto" }}>
             <table className="dv-table">
               <thead>
-                <tr><th>#</th><th>Name</th><th>Branch</th><th>College</th><th>Score</th><th>%</th><th>C</th><th>W</th><th>Skip</th><th>Time</th><th>Date</th></tr>
+                <tr>
+                  <th>#</th><th>Name</th><th>Enroll.</th><th>Branch</th><th>College</th>
+                  <th>Score</th><th>%</th><th>✓</th><th>✗</th><th>Skip</th>
+                  <th style={{color:"#60a5fa"}}>Sci</th>
+                  <th style={{color:"#a78bfa"}}>Math</th>
+                  <th style={{color:"#4ade80"}}>Eng</th>
+                  <th>Time</th><th>Date</th>
+                </tr>
               </thead>
               <tbody>
                 {sorted.map((s, i) => {
@@ -1126,6 +1464,7 @@ function DataViewer() {
                     <tr key={i} className={pct >= 60 ? "dv-pass" : pct >= 40 ? "dv-avg" : "dv-fail"}>
                       <td style={{color:"#64748b"}}>{i+1}</td>
                       <td style={{color:"#f1f5f9",fontWeight:600}}>{s.name}</td>
+                      <td style={{color:"#94a3b8",fontSize:".7rem"}}>{s.enrollment||"—"}</td>
                       <td style={{color:"#94a3b8",fontSize:".72rem"}}>{s.branch.split(" ").slice(0,2).join(" ")}</td>
                       <td style={{color:"#64748b",fontSize:".72rem"}}>{s.college !== "—" ? s.college : "—"}</td>
                       <td style={{color:"#60a5fa",fontWeight:700}}>{s.score.toFixed(1)}</td>
@@ -1133,6 +1472,9 @@ function DataViewer() {
                       <td style={{color:"#4ade80"}}>{s.correct}</td>
                       <td style={{color:"#f87171"}}>{s.wrong}</td>
                       <td style={{color:"#94a3b8"}}>{s.unattempted}</td>
+                      <td style={{color:"#60a5fa",fontSize:".72rem"}}>{(s.sciScore||0).toFixed(0)}/{(s.sciTotal||0)*2}</td>
+                      <td style={{color:"#a78bfa",fontSize:".72rem"}}>{(s.mathScore||0).toFixed(0)}/{(s.mathTotal||0)*2}</td>
+                      <td style={{color:"#4ade80",fontSize:".72rem"}}>{(s.engScore||0).toFixed(0)}/{(s.engTotal||0)*2}</td>
                       <td style={{color:"#64748b"}}>{Math.floor(s.timeTaken/60)}m</td>
                       <td style={{color:"#64748b",fontSize:".7rem"}}>{s.date}</td>
                     </tr>
@@ -1144,7 +1486,7 @@ function DataViewer() {
           <div style={{fontSize:".7rem",color:"#475569",marginTop:8}}>
             {FB_CONFIGURED
               ? "🔥 Data stored in Firebase — visible across all devices in real-time."
-              : "⚠ Local mode — data stored per-browser. Set up Firebase in Admin → Settings for shared data."}
+              : "⚠ Local mode — data stored per-browser. Set up Firebase in Settings for shared data."}
           </div>
         </>
       )}
@@ -1456,6 +1798,31 @@ code{font-size:.83em;background:#1e293b;padding:1px 6px;border-radius:4px;color:
 .dv-pass td:first-child{border-left:2px solid #4ade80;}
 .dv-avg  td:first-child{border-left:2px solid #fbbf24;}
 .dv-fail td:first-child{border-left:2px solid #f87171;}
+/* ── Anti-cheat warning ── */
+.cheat-warn{position:fixed;top:0;left:0;right:0;z-index:9999;background:#7f1d1d;color:#fecaca;text-align:center;padding:.55rem 1rem;font-size:.82rem;font-weight:600;cursor:pointer;border-bottom:2px solid #dc2626;}
+/* ── Section breakdown bars (result) ── */
+.sec-row{display:flex;align-items:center;gap:10px;margin-bottom:9px;flex-wrap:wrap;}
+.sec-row-left{display:flex;align-items:center;gap:8px;min-width:160px;}
+.sec-row-bar{display:flex;align-items:center;gap:8px;flex:1;min-width:140px;}
+.sec-bar-bg{flex:1;height:7px;background:#131e30;border-radius:4px;overflow:hidden;}
+.sec-bar-fill{height:100%;border-radius:4px;transition:width 1s ease;}
+/* ── Answer Review ── */
+.rev-item{background:#0e1a2e;border:1.5px solid #1e2d45;border-radius:12px;padding:1rem;}
+.rev-ok{border-color:#166534;}.rev-wrong{border-color:#7f1d1d;}.rev-skip{border-color:#1e2d45;}
+.rev-top{display:flex;align-items:center;gap:8px;margin-bottom:.6rem;flex-wrap:wrap;}
+.rev-qnum{font-size:.7rem;color:#64748b;background:#131e30;border-radius:20px;padding:2px 8px;font-weight:700;}
+.rev-status{font-size:.72rem;font-weight:700;padding:2px 9px;border-radius:20px;margin-left:auto;}
+.rev-s-ok{background:#0d2b1e;color:#4ade80;}.rev-s-wrong{background:#2d0a0a;color:#f87171;}.rev-s-skip{background:#1e2d45;color:#94a3b8;}
+.rev-qtxt{font-size:.9rem;color:#e2e8f0;line-height:1.6;margin-bottom:.75rem;}
+.rev-opts{display:flex;flex-direction:column;gap:6px;}
+.rev-opt{display:flex;align-items:center;gap:9px;padding:.5rem .8rem;border-radius:8px;background:#131e30;border:1px solid #1e2d45;font-size:.83rem;color:#94a3b8;}
+.rev-opt-correct{background:#0d2b1e;border-color:#166534;color:#4ade80;}
+.rev-opt-wrong{background:#2d0a0a;border-color:#7f1d1d;color:#f87171;}
+.rev-ol{width:22px;height:22px;border-radius:50%;background:#1e2d45;display:flex;align-items:center;justify-content:center;font-size:.68rem;font-weight:700;flex-shrink:0;}
+.rev-opt-correct .rev-ol{background:#166534;color:#4ade80;}
+.rev-opt-wrong .rev-ol{background:#7f1d1d;color:#f87171;}
+.rev-tag-ok{margin-left:auto;font-size:.67rem;font-weight:700;color:#4ade80;white-space:nowrap;}
+.rev-tag-wrong{margin-left:auto;font-size:.67rem;font-weight:700;color:#f87171;white-space:nowrap;}
     `}</style>
   );
 }
